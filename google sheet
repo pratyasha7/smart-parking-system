@@ -1,0 +1,169 @@
+/* Esp32 code for smart parking system where the esp32 is connected to a google sheet and sends real time data about when a car enters or exits plus the number of slots available. When a car enters the car
+number is asked to be entered manually thus sending that data to the google sheet as a record. 
+Components used: Servo, ir sensors, esp32, jumpers, Arduino Id
+*/
+
+#include <Arduino.h>
+#include <ESP32Servo.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// WiFi credentials
+const char* ssid = "Hush Hush";
+const char* password = "tobemyself";
+
+// Google Apps Script endpoint URL
+const char* scriptUrl = "https://script.google.com/macros/s/AKfycbyegLajBUoAybWJisGQvreIUJEcqS6eKZXhD5z8A5JGYIih9HnDD6oPkhWQbltOT-NTfg/exec";
+
+// Define the pins for the IR sensors and servo motors
+#define ENTRY_SENSOR_PIN  14
+#define EXIT_SENSOR_PIN   27
+#define ENTRY_SERVO_PIN   13
+#define EXIT_SERVO_PIN    18
+
+// Total number of parking slots
+int totalSlots = 10;
+int availableSlots = totalSlots;
+
+// Variables to keep track of sensor states
+bool entrySensorState = LOW;
+bool exitSensorState = LOW;
+
+// Servo objects
+Servo entryServo;
+Servo exitServo;
+
+// Car number input
+String carNumber = "";
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+
+  // Set the sensor pins as input
+  pinMode(ENTRY_SENSOR_PIN, INPUT);
+  pinMode(EXIT_SENSOR_PIN, INPUT);
+
+  // Attach the servo motors
+  entryServo.attach(ENTRY_SERVO_PIN);
+  exitServo.attach(EXIT_SERVO_PIN);
+
+  // Initialize the servos to closed position
+  entryServo.write(0);
+  exitServo.write(0);
+
+  // Initial delay to stabilize sensor readings
+  delay(2000);
+
+  // Print the initial availability of slots
+  Serial.print("Total slots: ");
+  Serial.println(totalSlots);
+  Serial.print("Available slots: ");
+  Serial.println(availableSlots);
+
+  // Read initial sensor states to avoid false triggers
+  entrySensorState = digitalRead(ENTRY_SENSOR_PIN);
+  exitSensorState = digitalRead(EXIT_SENSOR_PIN);
+}
+
+void loop() {
+  // Read the sensor values
+  bool entrySensorTriggered = digitalRead(ENTRY_SENSOR_PIN);
+  bool exitSensorTriggered = digitalRead(EXIT_SENSOR_PIN);
+
+  // Check if a car is entering
+  if (entrySensorTriggered && !entrySensorState) {
+    entrySensorState = true;
+    if (availableSlots > 0) {
+      availableSlots--;
+      Serial.println("Car entering. Please enter car number:");
+      while (Serial.available() == 0) {}
+      carNumber = Serial.readStringUntil('\n');
+      Serial.println("Car number entered: " + carNumber);
+      Serial.println("Car entered. Updated slot availability:");
+      // Open entry gate
+      entryServo.write(90);
+      delay(2000); // Keep the gate open for 2 seconds
+      entryServo.write(0);
+      sendToGoogleAppsScript("entry", availableSlots, carNumber);
+    } else {
+      Serial.println("Parking full. No available slots.");
+    }
+    printSlotAvailability();
+  } else if (!entrySensorTriggered) {
+    entrySensorState = false;
+  }
+
+  // Check if a car is exiting
+  if (exitSensorTriggered && !exitSensorState) {
+    exitSensorState = true;
+    if (availableSlots < totalSlots) {
+      availableSlots++;
+      Serial.println("Car exiting. Please enter car number:");
+      while (Serial.available() == 0) {}
+      carNumber = Serial.readStringUntil('\n');
+      Serial.println("Car number entered: " + carNumber);
+      Serial.println("Car exited. Updated slot availability:");
+      // Open exit gate
+      exitServo.write(90);
+      delay(2000); // Keep the gate open for 2 seconds
+      exitServo.write(0);
+      sendToGoogleAppsScript("exit", availableSlots, carNumber);
+    } else {
+      Serial.println("Error: More cars exiting than parked.");
+    }
+    printSlotAvailability();
+  } else if (!exitSensorTriggered) {
+    exitSensorState = false;
+  }
+
+  // Add a small delay to avoid rapid sensor state changes
+  delay(100);
+}
+
+void sendToGoogleAppsScript(String action, int slots, String carNumber) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(scriptUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<200> doc;
+    doc["action"] = action;
+    doc["availableSlots"] = slots;
+    doc["carNumber"] = carNumber;
+
+    String requestBody;
+    serializeJson(doc, requestBody);
+
+    int httpResponseCode = http.POST(requestBody);
+    if (httpResponseCode > 0) {
+      String response = http.getString();
+      if (response.indexOf("Moved Temporarily") > 0) {
+        Serial.println("Redirected response detected, please check the URL.");
+      } else {
+        Serial.println("Data sent to Google Apps Script: " + response);
+      }
+    } else {
+      Serial.print("Error sending data to Google Apps Script. HTTP response code: ");
+      Serial.println(httpResponseCode);
+      Serial.println(http.errorToString(httpResponseCode));
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi not connected");
+  }
+}
+
+void printSlotAvailability() {
+  Serial.print("Available slots: ");
+  Serial.println(availableSlots);
+}
